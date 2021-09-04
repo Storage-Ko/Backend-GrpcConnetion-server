@@ -2,48 +2,91 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"net"
-
-	"google.golang.org/grpc"
+	"sync"
 
 	"github.com/Backend-Grpc-server/data"
+	"google.golang.org/grpc"
+
+	postpb "github.com/Backend-Grpc-server/protos/v1/post"
 	userpb "github.com/Backend-Grpc-server/protos/v1/user"
 )
 
-const portNumber = "9000"
+const portNumber = "9001"
 
-type userServer struct {
-	userpb.UserServer
+type postServer struct {
+	postpb.PostServer
+
+	userCli userpb.UserClient
 }
 
-// GetUser returns user message by user_id
-func (s *userServer) GetUser(ctx context.Context, req *userpb.GetUserRequest) (*userpb.GetUserResponse, error) {
+var (
+	once sync.Once
+	cli  userpb.UserClient
+)
+
+func GetUserClient(serviceHost string) userpb.UserClient {
+	once.Do(func() {
+		conn, _ := grpc.Dial(serviceHost,
+			grpc.WithInsecure(),
+			grpc.WithBlock(),
+		)
+
+		cli = userpb.NewUserClient(conn)
+	})
+
+	return cli
+}
+
+// ListPostsByUserId returns post messages by user_id
+func (s *postServer) ListPostsByUserId(ctx context.Context, req *postpb.ListPostsByUserIdRequest) (*postpb.ListPostsByUserIdResponse, error) {
 	userID := req.UserId
 
-	var userMessage *userpb.UserMessage
-	for _, u := range data.UserData {
-		if u.UserId != userID {
+	resp, err := s.userCli.GetUser(ctx, &userpb.GetUserRequest{UserId: userID})
+	if err != nil {
+		return nil, err
+	}
+
+	var postMessages []*postpb.PostMessage
+	for _, up := range data.UserPosts {
+		if up.UserID != userID {
 			continue
 		}
-		userMessage = u
+
+		for _, p := range up.Posts {
+			p.Author = resp.UserMessage.Name
+		}
+
+		postMessages = up.Posts
 		break
 	}
 
-	return &userpb.GetUserResponse{
-		UserMessage: userMessage,
+	return &postpb.ListPostsByUserIdResponse{
+		PostMessages: postMessages,
 	}, nil
 }
 
-// ListUsers returns all user messages
-func (s *userServer) ListUsers(ctx context.Context, req *userpb.ListUsersRequest) (*userpb.ListUsersResponse, error) {
-	userMessages := make([]*userpb.UserMessage, len(data.UserData))
-	for i, u := range data.UserData {
-		userMessages[i] = u
+// ListPosts returns all post messages
+func (s *postServer) ListPosts(ctx context.Context, req *postpb.ListPostsRequest) (*postpb.ListPostsResponse, error) {
+	var postMessages []*postpb.PostMessage
+	fmt.Println(postMessages)
+	for _, up := range data.UserPosts {
+		resp, err := s.userCli.GetUser(ctx, &userpb.GetUserRequest{UserId: up.UserID})
+		if err != nil {
+			return nil, err
+		}
+
+		for _, p := range up.Posts {
+			p.Author = resp.UserMessage.Name
+		}
+
+		postMessages = append(postMessages, up.Posts...)
 	}
 
-	return &userpb.ListUsersResponse{
-		UserMessages: userMessages,
+	return &postpb.ListPostsResponse{
+		PostMessages: postMessages,
 	}, nil
 }
 
@@ -53,8 +96,11 @@ func main() {
 		log.Fatalf("failed to listen: %v", err)
 	}
 
+	userCli := GetUserClient("0.0.0.0:9000")
 	grpcServer := grpc.NewServer()
-	userpb.RegisterUserServer(grpcServer, &userServer{})
+	postpb.RegisterPostServer(grpcServer, &postServer{
+		userCli: userCli,
+	})
 
 	log.Printf("start gRPC server on %s port", portNumber)
 	if err := grpcServer.Serve(lis); err != nil {
